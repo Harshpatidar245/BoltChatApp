@@ -5,7 +5,7 @@ import { RoomSelector } from './components/RoomSelector';
 import { ChatRoom } from './components/ChatRoom';
 
 function App() {
-  const { rooms, loading, createRoom, sendMessage, getMessagesForRoom } = useChatStore();
+  const { rooms, loading, createRoom, sendMessage, getMessagesForRoom, selectRoom } = useChatStore();
   const [currentRoom, setCurrentRoom] = useState<Room | null>(null);
   const [username, setUsername] = useState<string>('');
 
@@ -16,6 +16,7 @@ function App() {
   const handleJoinRoom = (room: Room, user: string) => {
     setCurrentRoom(room);
     setUsername(user);
+    selectRoom(room.id);
   };
 
   const handleSendMessage = (content: string) => {

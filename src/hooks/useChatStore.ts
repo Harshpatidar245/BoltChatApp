@@ -1,118 +1,102 @@
 import { useState, useEffect, useCallback } from 'react';
-import { supabase } from '../lib/supabase';
+import { api, socketManager } from '../lib/api';
 import { Room, Message } from '../types';
 
 export function useChatStore() {
   const [rooms, setRooms] = useState<Room[]>([]);
   const [messages, setMessages] = useState<Message[]>([]);
   const [loading, setLoading] = useState(true);
+  const [currentRoomId, setCurrentRoomId] = useState<string | null>(null);
 
   useEffect(() => {
+    const socket = socketManager.connect();
+
     loadRooms();
-    loadMessages();
 
-    const roomsSubscription = supabase
-      .channel('rooms-channel')
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'rooms' }, (payload) => {
-        const newRoom: Room = {
-          id: payload.new.id,
-          name: payload.new.name,
-        };
-        setRooms(prev => [...prev, newRoom]);
-      })
-      .subscribe();
-
-    const messagesSubscription = supabase
-      .channel('messages-channel')
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages' }, (payload) => {
-        const newMessage: Message = {
-          id: payload.new.id,
-          roomId: payload.new.room_id,
-          username: payload.new.username,
-          content: payload.new.content,
-          timestamp: new Date(payload.new.created_at).getTime(),
-        };
-        setMessages(prev => [...prev, newMessage]);
-      })
-      .subscribe();
+    socket.on('new-message', (message: any) => {
+      const newMessage: Message = {
+        id: message._id,
+        roomId: message.roomId,
+        username: message.username,
+        content: message.content,
+        timestamp: new Date(message.createdAt).getTime(),
+      };
+      setMessages(prev => [...prev, newMessage]);
+    });
 
     return () => {
-      roomsSubscription.unsubscribe();
-      messagesSubscription.unsubscribe();
+      socketManager.disconnect();
     };
   }, []);
 
-  const loadRooms = async () => {
-    const { data, error } = await supabase
-      .from('rooms')
-      .select('*')
-      .order('created_at', { ascending: true });
+  useEffect(() => {
+    if (currentRoomId) {
+      const socket = socketManager.getSocket();
+      if (socket) {
+        socket.emit('join-room', currentRoomId);
+        loadMessages(currentRoomId);
+      }
 
-    if (error) {
-      console.error('Error loading rooms:', error);
-      return;
+      return () => {
+        if (socket) {
+          socket.emit('leave-room', currentRoomId);
+        }
+      };
     }
+  }, [currentRoomId]);
 
-    if (data) {
+  const loadRooms = async () => {
+    try {
+      const data = await api.fetchRooms();
       setRooms(data.map(room => ({
-        id: room.id,
+        id: room._id || room.id,
         name: room.name,
       })));
+    } catch (error) {
+      console.error('Error loading rooms:', error);
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   };
 
-  const loadMessages = async () => {
-    const { data, error } = await supabase
-      .from('messages')
-      .select('*')
-      .order('created_at', { ascending: true });
-
-    if (error) {
-      console.error('Error loading messages:', error);
-      return;
-    }
-
-    if (data) {
-      setMessages(data.map(msg => ({
-        id: msg.id,
-        roomId: msg.room_id,
+  const loadMessages = async (roomId: string) => {
+    try {
+      const data = await api.fetchMessages(roomId);
+      const roomMessages = data.map(msg => ({
+        id: msg._id || msg.id,
+        roomId: msg.roomId,
         username: msg.username,
         content: msg.content,
-        timestamp: new Date(msg.created_at).getTime(),
-      })));
+        timestamp: new Date(msg.createdAt).getTime(),
+      }));
+      setMessages(prev => {
+        const filtered = prev.filter(m => m.roomId !== roomId);
+        return [...filtered, ...roomMessages];
+      });
+    } catch (error) {
+      console.error('Error loading messages:', error);
     }
   };
 
   const createRoom = useCallback(async (name: string): Promise<Room | null> => {
-    const { data, error } = await supabase
-      .from('rooms')
-      .insert({ name })
-      .select()
-      .single();
-
-    if (error) {
+    try {
+      const data = await api.createRoom(name);
+      const newRoom = {
+        id: data._id || data.id,
+        name: data.name,
+      };
+      setRooms(prev => [...prev, newRoom]);
+      return newRoom;
+    } catch (error) {
       console.error('Error creating room:', error);
       return null;
     }
-
-    return {
-      id: data.id,
-      name: data.name,
-    };
   }, []);
 
-  const sendMessage = useCallback(async (roomId: string, username: string, content: string) => {
-    const { error } = await supabase
-      .from('messages')
-      .insert({
-        room_id: roomId,
-        username,
-        content,
-      });
-
-    if (error) {
-      console.error('Error sending message:', error);
+  const sendMessage = useCallback((roomId: string, username: string, content: string) => {
+    const socket = socketManager.getSocket();
+    if (socket) {
+      socket.emit('send-message', { roomId, username, content });
     }
   }, []);
 
@@ -120,11 +104,16 @@ export function useChatStore() {
     return messages.filter(msg => msg.roomId === roomId);
   }, [messages]);
 
+  const selectRoom = useCallback((roomId: string) => {
+    setCurrentRoomId(roomId);
+  }, []);
+
   return {
     rooms,
     loading,
     createRoom,
     sendMessage,
     getMessagesForRoom,
+    selectRoom,
   };
 }
